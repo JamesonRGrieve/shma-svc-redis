@@ -13,7 +13,11 @@
 {%   set _ = user_tokens.append('resetcommands') %}
 {% endif %}
 {% for pwd in user.passwords | default([]) %}
-{%   set _ = user_tokens.append('>' ~ pwd) %}
+{%   if pwd.startswith('#') %}
+{%     set _ = user_tokens.append(pwd) %}
+{%   else %}
+{%     set _ = user_tokens.append('>' ~ pwd) %}
+{%   endif %}
 {% endfor %}
 {% for hashed in user.hashed_passwords | default([]) %}
 {%   set _ = user_tokens.append('#' ~ hashed) %}

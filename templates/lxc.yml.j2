@@ -1,5 +1,6 @@
 {%- set redis_password_value = redis_password | default('', true) -%}
 {%- set redis_password_value = redis_password_value | trim -%}
+{%- set redis_password_file = redis_lxc_password_file -%}
 {%- set appendonly_mount = redis_ephemeral_mounts.get('appendonlydir', {}) -%}
 {%- set appendonly_enabled = appendonly_mount.get('enabled', False) -%}
 {%- set appendonly_lxc = appendonly_mount.get('lxc', {}) -%}
@@ -32,13 +33,9 @@ config:
   limits.memory: 1GiB
   environment.CACHE_HOST: "{{ service_ip }}"
   environment.CACHE_PORT: "{{ redis_port }}"
-  environment.CACHE_PASSWORD: "{{ redis_password_value }}"
-{%- if redis_password_value %}
-  environment.CACHE_URL: "redis://:{{ redis_password_value }}@{{ service_ip }}:{{ redis_port }}/0"
-{%- else %}
   environment.CACHE_URL: "redis://{{ service_ip }}:{{ redis_port }}/0"
-{%- endif %}
-  environment.REDIS_PASSWORD: "{{ redis_password_value }}"
+  environment.CACHE_PASSWORD_FILE: "{{ redis_password_file }}"
+  environment.REDIS_PASSWORD_FILE: "{{ redis_password_file }}"
   environment.REDIS_HOST: "{{ service_ip }}"
   environment.REDIS_PORT: "{{ redis_port }}"
   user.user-data: |
@@ -110,7 +107,13 @@ config:
           fi
       - [ mount, -a ]
       - |
-          mountpoint -q {{ appendonly_path }} || (echo 'appendonlydir mount failed' >&2; exit 1)
+          mountpoint -q {{ appendonly_path }} || (echo 'appendonlydir mount failed; inspect dmesg for details' >&2; exit 1)
+{% endif %}
+{% if redis_password_file %}
+      - |
+          if [ ! -f {{ redis_password_file }} ]; then
+            echo 'redis password file {{ redis_password_file }} is missing; ensure it is mounted as a secret' >&2
+          fi
 {% endif %}
       - |
           if ! grep -Fxq 'include /etc/redis/shma.conf' /etc/redis/redis.conf; then
@@ -129,16 +132,20 @@ config:
         description: Ensure Redis is accepting connections
     type: exec
     command:
-      - redis-cli
-{%- if redis_password_value %}
-      - -a
-      - "{{ redis_password_value }}"
-{%- endif %}
-      - -h
-      - 127.0.0.1
-      - -p
-      - "{{ redis_port }}"
-      - PING
+      - sh
+      - -c
+      - >-
+          PASSWORD_FILE="{{ redis_password_file }}";
+          if [ -f "$PASSWORD_FILE" ]; then
+            PASS="$(cat "$PASSWORD_FILE")";
+          else
+            PASS="{{ redis_password_value }}";
+          fi;
+          if [ -n "$PASS" ]; then
+            exec redis-cli -a "$PASS" -h 127.0.0.1 -p {{ redis_port }} PING;
+          else
+            exec redis-cli -h 127.0.0.1 -p {{ redis_port }} PING;
+          fi
     interval: 30s
     timeout: 5s
 devices:

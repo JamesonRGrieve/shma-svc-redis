@@ -39,6 +39,7 @@ redis_maxmemory: "2gb"
 redis_maxmemory_policy: "noeviction"
 redis_appendfsync: "everysec"
 redis_maxclients: 10000
+redis_docs_url: "https://docs.shma.dev/redis"
 redis_rate_limit_documentation: "Implement namespace-level rate limiting using NetworkPolicy with limiters such as Cilium or Calico."
 redis_save_points:
   - seconds: 900
@@ -74,6 +75,13 @@ redis_network_policy_allowed_peers:
   - podSelector:
       matchLabels:
         shma.dev/redis-access: "true"
+redis_network_policy_cluster_cidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+redis_network_policy_dns_namespace: "kube-system"
+redis_network_policy_dns_selector:
+  k8s-app: kube-dns
 redis_acl_enabled: true
 redis_acl_secret_name: "redis-acl"
 redis_acl_secret_key: "users.acl"
@@ -109,13 +117,18 @@ redis_enable_metrics: false
 redis_metrics_image: "quay.io/oliver006/redis_exporter:v1.51.0"
 redis_metrics_resources:
   requests:
-    cpu: 25m
+    cpu: 50m
     memory: 64Mi
   limits:
     cpu: 100m
     memory: 128Mi
+redis_metrics_servicemonitor_enabled: true
+redis_metrics_servicemonitor_labels: {}
+redis_metrics_servicemonitor_namespace: "{{ redis_namespace }}"
+redis_metrics_servicemonitor_interval: "30s"
 redis_kubernetes_data_dir: "/bitnami/redis/data"
 redis_lxc_data_dir: "/var/lib/redis"
+redis_lxc_password_file: "/run/redis-password/password"
 redis_appendonlydir_enabled: true
 redis_appendonlydir_name: "appendonlydir"
 redis_appendonlydir_size_limit: ""
@@ -135,3 +148,5 @@ redis_backup_schedule: "0 2 * * *"
 redis_backup_image: "docker.io/bitnami/redis:7.2"
 redis_backup_command: []
 redis_backup_extra_env: {}
+redis_backup_pvc_name: ""
+redis_tls_healthcheck_skip_verify: false
