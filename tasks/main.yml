@@ -19,6 +19,15 @@
   tags:
     - redis
 
+- name: Fail when TLS requested for LXC runtime
+  when:
+    - redis_runtime_target == 'lxc'
+    - redis_tls_enabled
+  ansible.builtin.fail:
+    msg: "TLS is not supported for the LXC runtime"
+  tags:
+    - redis
+
 - name: Validate password secret configuration
   ansible.builtin.assert:
     that:
@@ -33,6 +42,21 @@
     that:
       - redis_enable_plaintext_port or redis_tls_enabled
     fail_msg: "Either the plaintext port or TLS port must be enabled"
+  tags:
+    - redis
+
+- name: Verify TLS secret exists before deployment
+  when:
+    - redis_runtime_target == 'kubernetes'
+    - redis_tls_enabled
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ redis_tls_cert_secret_name }}"
+    namespace: "{{ redis_namespace }}"
+  register: redis_tls_secret_info
+  changed_when: false
+  failed_when: (redis_tls_secret_info.resources | default([])) | length == 0
   tags:
     - redis
 
@@ -114,48 +138,15 @@
   tags:
     - redis
 
-- name: Locate redis-server binary for ACL validation
+- name: Validate appendonlydir sizeLimit quantity
+  vars:
+    redis_appendonly_size_limit: "{{ redis_ephemeral_mounts.get('appendonlydir', {}).get('kubernetes', {}).get('size_limit', '') }}"
   when:
-    - redis_acl_enabled
-    - redis_acl_validate
-    - redis_acl_validator_command | length == 0
-  ansible.builtin.command: which redis-server
-  register: redis_acl_redis_server_check
-  failed_when: false
-  changed_when: false
-  tags:
-    - redis
-
-- name: Locate redis-cli binary for ACL validation
-  when:
-    - redis_acl_enabled
-    - redis_acl_validate
-    - redis_acl_validator_command | length == 0
-  ansible.builtin.command: which redis-cli
-  register: redis_acl_redis_cli_check
-  failed_when: false
-  changed_when: false
-  tags:
-    - redis
-
-- name: Set ACL validation availability
-  when:
-    - redis_acl_enabled
-    - redis_acl_validate
-    - redis_acl_validator_command | length == 0
-  ansible.builtin.set_fact:
-    redis_acl_validation_available: "{{ (redis_acl_redis_server_check.rc | default(1)) == 0 and (redis_acl_redis_cli_check.rc | default(1)) == 0 }}"
-  tags:
-    - redis
-
-- name: Warn when ACL validation prerequisites missing
-  when:
-    - redis_acl_enabled
-    - redis_acl_validate
-    - redis_acl_validator_command | length == 0
-    - not redis_acl_validation_available | default(false)
-  ansible.builtin.debug:
-    msg: "Skipping ACL validation because redis-server or redis-cli is not available on the control host"
+    - redis_appendonly_size_limit | length > 0
+  ansible.builtin.assert:
+    that:
+      - redis_appendonly_size_limit is match('^\\d+(?:Ei|Pi|Ti|Gi|Mi|Ki)$')
+    fail_msg: "redis_ephemeral_mounts.appendonlydir.kubernetes.size_limit must be a valid Kubernetes quantity (e.g. 64Mi, 1Gi)"
   tags:
     - redis
 
@@ -182,60 +173,39 @@
     - redis
 
 - block:
-    - name: Ensure temporary Redis instance started for ACL validation
+    - name: Validate ACL syntax with local parser
       when: redis_acl_validator_command | length == 0
       ansible.builtin.command: >-
-        redis-server
-        --daemonize yes
-        --save ""
-        --appendonly no
-        --bind 127.0.0.1
-        --port 0
-        --aclfile {{ redis_acl_validation_tempfile.path }}
-        --dir {{ redis_acl_validation_tempfile.path | dirname }}
-        --logfile {{ redis_acl_validation_tempfile.path }}.log
-        --pidfile {{ redis_acl_validation_tempfile.path }}.pid
-        --unixsocket {{ redis_acl_validation_tempfile.path }}.sock
-        --unixsocketperm 700
-      register: redis_acl_validation_start
-      changed_when: false
-      failed_when: redis_acl_validation_start.rc not in [0]
-
-    - name: Wait for temporary Redis socket
-      when: redis_acl_validator_command | length == 0
-      ansible.builtin.command: redis-cli -s {{ redis_acl_validation_tempfile.path }}.sock PING
-      register: redis_acl_validation_ping
-      retries: 5
-      delay: 1
-      until: redis_acl_validation_ping.rc == 0
-      changed_when: false
-
-    - name: Load ACL file using redis-cli
-      when: redis_acl_validator_command | length == 0
-      ansible.builtin.command: redis-cli -s {{ redis_acl_validation_tempfile.path }}.sock ACL LOAD
+        {{ ansible_playbook_python | default('python3') }}
+        {{ role_path }}/files/redis_acl_validator.py
+        {{ redis_acl_validation_tempfile.path }}
       register: redis_acl_validation_result
       changed_when: false
 
     - name: Run custom ACL validation command
-      when:
-        - redis_acl_validator_command | length > 0
+      when: redis_acl_validator_command | length > 0
       ansible.builtin.shell: "{{ redis_acl_validator_command | replace('%ACL_FILE%', redis_acl_validation_tempfile.path) }}"
       args:
         executable: /bin/sh
+      register: redis_acl_validation_result
       changed_when: false
+
+    - name: Mark ACL validation success
+      ansible.builtin.set_fact:
+        redis_acl_validation_succeeded: true
+  rescue:
+    - name: Display ACL validation failure details
+      ansible.builtin.debug:
+        msg:
+          - "ACL validation failed"
+          - "Validator output: {{ redis_acl_validation_result.stderr | default('') }}"
+          - "ACL file preserved at {{ redis_acl_validation_tempfile.path }} for troubleshooting"
+          - "ACL preview: {{ redis_acl_effective_content.splitlines()[:10] }}"
+      failed_when: true
   when:
     - redis_acl_enabled
     - redis_acl_validate
     - redis_acl_validation_tempfile is defined
-    - redis_acl_validator_command | length > 0 or redis_acl_validation_available | default(false)
-  always:
-    - name: Shutdown temporary Redis instance
-      when:
-        - redis_acl_validator_command | length == 0
-        - redis_acl_validate
-      ansible.builtin.command: redis-cli -s {{ redis_acl_validation_tempfile.path }}.sock SHUTDOWN NOSAVE
-      changed_when: false
-      failed_when: false
   tags:
     - redis
 
@@ -244,14 +214,55 @@
     - redis_acl_enabled
     - redis_acl_validate
     - redis_acl_validation_tempfile is defined
+    - redis_acl_validation_succeeded | default(false)
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
   loop:
     - "{{ redis_acl_validation_tempfile.path }}"
-    - "{{ redis_acl_validation_tempfile.path }}.log"
-    - "{{ redis_acl_validation_tempfile.path }}.pid"
-    - "{{ redis_acl_validation_tempfile.path }}.sock"
+  tags:
+    - redis
+
+- name: Discover pods labeled for Redis access
+  when:
+    - redis_runtime_target == 'kubernetes'
+    - redis_network_policy_enabled
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: all
+    label_selectors:
+      - "shma.dev/redis-access=true"
+  register: redis_access_pod_info
+  failed_when: false
+  changed_when: false
+  tags:
+    - redis
+
+- name: Summarize labeled Redis access pods
+  when:
+    - redis_runtime_target == 'kubernetes'
+    - redis_network_policy_enabled
+  vars:
+    _pods_yaml: |-
+      {% set pods = [] %}
+      {% for pod in redis_access_pod_info.resources | default([]) %}
+      {%   set namespace = pod.metadata.namespace | default('') %}
+      {%   set name = pod.metadata.name | default('') %}
+      {%   set identifier = (namespace + '/' if namespace else '') + name %}
+      {%   set _ = pods.append(identifier) %}
+      {% endfor %}
+      {{ pods }}
+  ansible.builtin.set_fact:
+    redis_network_policy_access_pods: "{{ _pods_yaml | from_yaml }}"
+  tags:
+    - redis
+
+- name: Ensure redis access pod list is defined when discovery skipped
+  when:
+    - redis_network_policy_access_pods is not defined
+  ansible.builtin.set_fact:
+    redis_network_policy_access_pods: []
   tags:
     - redis
 
@@ -275,6 +286,15 @@
     state: present
     definition: {{ lookup('template', 'redis-acl-secret.yml.j2') | from_yaml }}
   no_log: true
+  tags:
+    - redis
+
+- name: Ensure backup PVC is provided when backups are enabled
+  when:
+    - redis_backup_enabled
+    - redis_backup_pvc_name | length == 0
+  ansible.builtin.fail:
+    msg: "Provide redis_backup_pvc_name so the backup job can persist artifacts"
   tags:
     - redis
 

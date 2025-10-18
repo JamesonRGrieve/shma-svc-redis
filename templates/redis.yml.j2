@@ -12,6 +12,7 @@ metadata:
 {% set acl_secret_path = '/opt/bitnami/redis/mounted-etc/users.acl' %}
 {% set tls_cert_path = redis_tls_mount_path %}
 {% set redis_port_value = redis_port if redis_enable_plaintext_port else 0 %}
+{% set tls_health_extra_flags = '--insecure ' if redis_tls_healthcheck_skip_verify else '' %}
 {% for key, value in redis_labels.items() %}
     {{ key }}: {{ value }}
 {% endfor %}
@@ -28,6 +29,9 @@ data:
     appenddirname {{ redis_appendonlydir_name }}
 {% endif %}
     appendonly {{ 'yes' if redis_persistence_enabled else 'no' }}
+{% if appendonly_fs_tmpfs %}
+    # appendfsync overridden because appendonlydir uses memory-backed storage
+{% endif %}
     appendfsync {{ appendfsync_value }}
     maxmemory {{ redis_maxmemory }}
     maxmemory-policy {{ redis_maxmemory_policy }}
@@ -164,7 +168,7 @@ spec:
                 - >-
                   REDIS_PASSWORD="$(cat /run/redis-password/password)" &&
 {% if redis_tls_enabled %}
-                  redis-cli --tls --cert {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }} --key {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }} --cacert {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }} -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_tls_port }} ping
+                  redis-cli --tls {{ tls_health_extra_flags }}--cert {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }} --key {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }} --cacert {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }} -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_tls_port }} ping
 {% else %}
                   redis-cli -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_port }} ping
 {% endif %}
@@ -179,7 +183,7 @@ spec:
                 - >-
                   REDIS_PASSWORD="$(cat /run/redis-password/password)" &&
 {% if redis_tls_enabled %}
-                  redis-cli --tls --cert {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }} --key {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }} --cacert {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }} -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_tls_port }} ping | grep -q PONG
+                  redis-cli --tls {{ tls_health_extra_flags }}--cert {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }} --key {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }} --cacert {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }} -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_tls_port }} ping | grep -q PONG
 {% else %}
                   redis-cli -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_port }} ping | grep -q PONG
 {% endif %}
@@ -187,7 +191,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
 {% if redis_enable_metrics %}
-        - name: redis-exporter
+        - name: {{ redis_name }}-exporter
           image: {{ redis_metrics_image }}
           ports:
             - name: metrics
@@ -360,6 +364,56 @@ spec:
     {{ key }}: {{ value }}
 {% endfor %}
 ---
+{% if redis_enable_metrics %}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ redis_service_name }}-metrics
+  namespace: {{ redis_namespace }}
+  labels:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 9121
+      targetPort: metrics
+  selector:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+---
+{% if redis_metrics_servicemonitor_enabled %}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ redis_name }}
+  namespace: {{ redis_metrics_servicemonitor_namespace }}
+  labels:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+{% for key, value in redis_metrics_servicemonitor_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+spec:
+  selector:
+    matchLabels:
+{% for key, value in redis_labels.items() %}
+      {{ key }}: {{ value }}
+{% endfor %}
+  namespaceSelector:
+    matchNames:
+      - {{ redis_namespace }}
+  endpoints:
+    - port: metrics
+      interval: {{ redis_metrics_servicemonitor_interval }}
+      scheme: http
+{% endif %}
+---
+{% endif %}
 {% if redis_network_policy_enabled %}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -371,7 +425,8 @@ metadata:
     {{ key }}: {{ value }}
 {% endfor %}
   annotations:
-    shma.dev/rate-limiting: {{ redis_rate_limit_documentation | quote }}
+    shma.dev/docs-url: {{ redis_docs_url | quote }}
+    shma.dev/redis-access-label: 'shma.dev/redis-access="true"'
 spec:
   podSelector:
     matchLabels:
@@ -380,6 +435,7 @@ spec:
 {% endfor %}
   policyTypes:
     - Ingress
+    - Egress
   ingress:
     - ports:
 {% if redis_enable_plaintext_port %}
@@ -410,8 +466,58 @@ spec:
 {% else %}
       from: []
 {% endif %}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ redis_network_policy_dns_namespace }}
+{% if redis_network_policy_dns_selector %}
+          podSelector:
+            matchLabels:
+{% for key, value in redis_network_policy_dns_selector.items() %}
+              {{ key }}: {{ value }}
+{% endfor %}
+{% endif %}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+{% if redis_network_policy_cluster_cidrs %}
+{%   for cidr in redis_network_policy_cluster_cidrs %}
+        - ipBlock:
+            cidr: {{ cidr }}
+{%   endfor %}
+{% else %}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ redis_namespace }}
+{% endif %}
 {% endif %}
 ---
+{% if redis_network_policy_enabled %}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ redis_name }}-access-debug
+  namespace: {{ redis_namespace }}
+  labels:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+data:
+  requiredLabel: 'shma.dev/redis-access="true"'
+  discoveredPods: |
+{% if redis_network_policy_access_pods | length > 0 %}
+{%   for pod in redis_network_policy_access_pods %}
+    {{ pod }}
+{%   endfor %}
+{% else %}
+    (none discovered; run `kubectl get pods -A -l shma.dev/redis-access=true`)
+{% endif %}
+---
+{% endif %}
 {% if redis_backup_enabled %}
 apiVersion: batch/v1
 kind: CronJob
@@ -465,7 +571,14 @@ spec:
               env:
 {% for key, value in redis_backup_extra_env.items() %}
                 - name: {{ key }}
+{%   if value is mapping and value.secret_name is defined %}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ value.secret_name }}
+                      key: {{ value.secret_key | default(value.key) }}
+{%   else %}
                   value: {{ value | quote }}
+{%   endif %}
 {% endfor %}
 {% endif %}
           volumes:
@@ -476,7 +589,8 @@ spec:
                   - key: {{ redis_password_secret_key }}
                     path: password
             - name: redis-backup
-              emptyDir: {}
+              persistentVolumeClaim:
+                claimName: {{ redis_backup_pvc_name }}
 {% if redis_tls_enabled %}
             - name: redis-tls
               secret:
