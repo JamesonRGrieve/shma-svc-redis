@@ -6,6 +6,9 @@ redis_labels:
   app.kubernetes.io/name: "redis"
   app.kubernetes.io/instance: "redis"
   app.kubernetes.io/component: "database"
+redis_runtime_templates:
+  kubernetes: redis.yml.j2
+  lxc: lxc.yml.j2
 redis_image: "docker.io/bitnami/redis:7.2"
 redis_image_pull_policy: "IfNotPresent"
 redis_replicas: 1
