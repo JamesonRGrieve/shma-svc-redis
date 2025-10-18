@@ -1,0 +1,246 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ redis_configmap_name }}
+  namespace: {{ redis_namespace }}
+  labels:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+data:
+  redis.conf: |
+    bind 0.0.0.0
+    port {{ redis_port }}
+    protected-mode yes
+    dir /bitnami/redis/data
+    appendonly yes
+    appendfsync {{ redis_appendfsync }}
+    maxmemory {{ redis_maxmemory }}
+    maxmemory-policy {{ redis_maxmemory_policy }}
+    rename-command FLUSHDB ""
+    rename-command FLUSHALL ""
+{% if redis_acl_enabled %}
+    aclfile /opt/bitnami/redis/mounted-etc/users.acl
+{% endif %}
+{% for line in redis_additional_config %}
+    {{ line }}
+{% endfor %}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ redis_statefulset_name }}
+  namespace: {{ redis_namespace }}
+  labels:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+spec:
+  replicas: {{ redis_replicas }}
+  serviceName: {{ redis_headless_service_name }}
+  selector:
+    matchLabels:
+{% for key, value in redis_labels.items() %}
+      {{ key }}: {{ value }}
+{% endfor %}
+  template:
+    metadata:
+      labels:
+{% for key, value in redis_labels.items() %}
+        {{ key }}: {{ value }}
+{% endfor %}
+    spec:
+      securityContext:
+        fsGroup: 1001
+        runAsUser: 1001
+        runAsNonRoot: true
+      containers:
+        - name: redis
+          image: {{ redis_image }}
+          imagePullPolicy: {{ redis_image_pull_policy }}
+          command:
+            - redis-server
+            - /opt/bitnami/redis/mounted-etc/redis.conf
+          env:
+            - name: REDIS_PASSWORD_FILE
+              value: /run/redis-password/password
+            - name: ALLOW_EMPTY_PASSWORD
+              value: "no"
+          ports:
+            - name: redis
+              containerPort: {{ redis_port }}
+          volumeMounts:
+            - name: redis-config
+              mountPath: /opt/bitnami/redis/mounted-etc
+            - name: redis-password
+              mountPath: /run/redis-password
+              readOnly: true
+{% if redis_acl_enabled %}
+            - name: redis-acl
+              mountPath: /opt/bitnami/redis/mounted-etc/users.acl
+              subPath: users.acl
+              readOnly: true
+{% endif %}
+            - name: redis-data
+              mountPath: /bitnami/redis/data
+{% if redis_resources %}
+          resources:
+{{ redis_resources | to_nice_yaml(indent=12) | indent(10, False) }}
+{% else %}
+          resources: {}
+{% endif %}
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 5
+            periodSeconds: 10
+{% if redis_node_selector %}
+      nodeSelector:
+{{ redis_node_selector | to_nice_yaml(indent=8) | indent(6, False) }}
+{% else %}
+      nodeSelector: {}
+{% endif %}
+{% if redis_tolerations %}
+      tolerations:
+{{ redis_tolerations | to_nice_yaml(indent=8) | indent(6, False) }}
+{% else %}
+      tolerations: []
+{% endif %}
+{% if redis_affinity %}
+      affinity:
+{{ redis_affinity | to_nice_yaml(indent=8) | indent(6, False) }}
+{% else %}
+      affinity: {}
+{% endif %}
+{% if redis_topology_spread_constraints %}
+      topologySpreadConstraints:
+{{ redis_topology_spread_constraints | to_nice_yaml(indent=8) | indent(6, False) }}
+{% else %}
+      topologySpreadConstraints: []
+{% endif %}
+      volumes:
+        - name: redis-config
+          configMap:
+            name: {{ redis_configmap_name }}
+        - name: redis-password
+          secret:
+            secretName: {{ redis_password_secret_name }}
+            items:
+              - key: {{ redis_password_secret_key }}
+                path: password
+{% if redis_acl_enabled %}
+        - name: redis-acl
+          secret:
+            secretName: {{ redis_acl_secret_name }}
+            items:
+              - key: {{ redis_acl_secret_key }}
+                path: users.acl
+{% endif %}
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+        labels:
+{% for key, value in redis_labels.items() %}
+          {{ key }}: {{ value }}
+{% endfor %}
+      spec:
+        accessModes:
+{% for mode in redis_access_modes %}
+          - {{ mode }}
+{% endfor %}
+        resources:
+          requests:
+            storage: {{ redis_storage_size }}
+{% if redis_storage_class %}
+        storageClassName: {{ redis_storage_class }}
+{% endif %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ redis_service_name }}
+  namespace: {{ redis_namespace }}
+  labels:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+spec:
+  type: ClusterIP
+  ports:
+    - name: redis
+      port: {{ redis_port }}
+      targetPort: redis
+  selector:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ redis_headless_service_name }}
+  namespace: {{ redis_namespace }}
+  labels:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: redis
+      port: {{ redis_port }}
+      targetPort: redis
+  selector:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+---
+{% if redis_network_policy_enabled %}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ redis_name }}-ingress
+  namespace: {{ redis_namespace }}
+  labels:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+spec:
+  podSelector:
+    matchLabels:
+{% for key, value in redis_labels.items() %}
+      {{ key }}: {{ value }}
+{% endfor %}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ redis_port }}
+{% if redis_network_policy_allowed_peers %}
+      from:
+{% for peer in redis_network_policy_allowed_peers %}
+        -
+{% if peer.podSelector is defined %}
+          podSelector:
+{{ peer.podSelector | to_nice_yaml(indent=12) | indent(10, False) }}
+{% endif %}
+{% if peer.namespaceSelector is defined %}
+          namespaceSelector:
+{{ peer.namespaceSelector | to_nice_yaml(indent=12) | indent(10, False) }}
+{% endif %}
+{% if peer.ipBlock is defined %}
+          ipBlock:
+{{ peer.ipBlock | to_nice_yaml(indent=12) | indent(10, False) }}
+{% endif %}
+{% endfor %}
+{% else %}
+      from: []
+{% endif %}
+{% endif %}
