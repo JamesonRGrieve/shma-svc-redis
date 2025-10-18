@@ -16,6 +16,7 @@
 {%- else -%}
 {%-   set appendonly_path = '' -%}
 {%- endif -%}
+{%- set appendfsync_value = 'no' if appendonly_enabled and appendonly_path else redis_appendfsync -%}
 {#- Intentionally allow empty passwords for backwards compatibility; callers should set redis_password. -#}
 ---
 name: {{ redis_name }}
@@ -53,49 +54,79 @@ config:
           bind 0.0.0.0
           port {{ redis_port }}
           protected-mode yes
+          tcp-keepalive {{ redis_tcp_keepalive }}
+          timeout {{ redis_timeout }}
+          tcp-backlog {{ redis_tcp_backlog }}
           dir {{ redis_lxc_data_dir }}
 {% if appendonly_enabled and redis_appendonlydir_name %}
           appenddirname {{ redis_appendonlydir_name }}
 {% endif %}
           appendonly {{ 'yes' if redis_persistence_enabled else 'no' }}
-          appendfsync {{ redis_appendfsync }}
+          appendfsync {{ appendfsync_value }}
           maxmemory {{ redis_maxmemory }}
           maxmemory-policy {{ redis_maxmemory_policy }}
-          rename-command FLUSHDB ""
-          rename-command FLUSHALL ""
+          maxclients {{ redis_maxclients }}
+          lua-time-limit {{ redis_lua_time_limit }}
+          slowlog-log-slower-than {{ redis_slowlog_log_slower_than }}
+          slowlog-max-len {{ redis_slowlog_max_len }}
+{% for cmd in redis_disable_dangerous_commands %}
+          rename-command {{ cmd }} ""
+{% endfor %}
 {% if not redis_persistence_enabled %}
           save ""
 {% endif %}
-{%- if redis_password_value %}
+{% if redis_persistence_enabled and redis_save_points %}
+{% for save in redis_save_points %}
+          save {{ save.seconds }} {{ save.changes }}
+{% endfor %}
+{% endif %}
+{% if redis_acl_enabled %}
+          aclfile /etc/redis/users.acl
+{% elif redis_password_value %}
           requirepass {{ redis_password_value }}
-{%- endif %}
+{% endif %}
 {%- for line in redis_additional_config %}
           {{ line }}
 {%- endfor %}
+{% if redis_acl_enabled %}
+      - path: /etc/redis/users.acl
+        owner: redis:redis
+        permissions: "0640"
+        content: |
+{{ redis_acl_effective_content | indent(10) }}
+{% endif %}
     runcmd:
-      - install -d -o redis -g redis /etc/redis
-      - install -d -o redis -g redis {{ redis_lxc_data_dir }}
+      - [ install, -d, -o, redis, -g, redis, /etc/redis ]
+      - [ install, -d, -o, redis, -g, redis, {{ redis_lxc_data_dir }} ]
 {% if appendonly_enabled and appendonly_path %}
-      - install -d -o redis -g redis {{ appendonly_path }}
+      - [ install, -d, -o, redis, -g, redis, {{ appendonly_path }} ]
       - |
-        if ! mountpoint -q {{ appendonly_path }}; then
-          mount -t tmpfs{% if appendonly_mount_opts_joined %} -o {{ appendonly_mount_opts_joined }}{% endif %} tmpfs {{ appendonly_path }}
-        fi
+          if ! mountpoint -q {{ appendonly_path }}; then
+            mount -t tmpfs{% if appendonly_mount_opts_joined %} -o {{ appendonly_mount_opts_joined }}{% endif %} tmpfs {{ appendonly_path }}
+          fi
       - |
-        if ! grep -q '^tmpfs {{ appendonly_path }} ' /etc/fstab; then
-          echo 'tmpfs {{ appendonly_path }} tmpfs defaults{% if appendonly_mount_opts_joined %},{{ appendonly_mount_opts_joined }}{% endif %} 0 0' >> /etc/fstab
-        fi
+          if ! grep -Fxq 'tmpfs {{ appendonly_path }} tmpfs defaults{% if appendonly_mount_opts_joined %},{{ appendonly_mount_opts_joined }}{% endif %} 0 0' /etc/fstab; then
+            printf '%s\n' 'tmpfs {{ appendonly_path }} tmpfs defaults{% if appendonly_mount_opts_joined %},{{ appendonly_mount_opts_joined }}{% endif %} 0 0' >> /etc/fstab
+          fi
+      - [ mount, -a ]
+      - |
+          mountpoint -q {{ appendonly_path }} || (echo 'appendonlydir mount failed' >&2; exit 1)
 {% endif %}
       - |
-        if ! grep -q '^include /etc/redis/shma.conf' /etc/redis/redis.conf; then
-          printf '%s\n' 'include /etc/redis/shma.conf' >> /etc/redis/redis.conf
-        fi
-      - sed -i 's/^supervised no/supervised systemd/' /etc/redis/redis.conf
-      - systemctl restart redis-server
-      - systemctl enable redis-server
-checks:
-  redis:
-    description: Ensure Redis is accepting connections
+          if ! grep -Fxq 'include /etc/redis/shma.conf' /etc/redis/redis.conf; then
+            printf '%s\n' 'include /etc/redis/shma.conf' >> /etc/redis/redis.conf
+          fi
+      - [ sed, -i, 's/^supervised no/supervised systemd/', /etc/redis/redis.conf ]
+      - [ systemctl, restart, redis-server ]
+      - [ systemctl, enable, redis-server ]
+      - |
+          if ! systemctl is-active --quiet redis-server; then
+            journalctl -u redis-server --no-pager
+            exit 1
+          fi
+    checks:
+      redis:
+        description: Ensure Redis is accepting connections
     type: exec
     command:
       - redis-cli

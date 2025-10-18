@@ -28,6 +28,233 @@
   tags:
     - redis
 
+- name: Ensure at least one Redis listener is enabled
+  ansible.builtin.assert:
+    that:
+      - redis_enable_plaintext_port or redis_tls_enabled
+    fail_msg: "Either the plaintext port or TLS port must be enabled"
+  tags:
+    - redis
+
+- name: Validate Redis operating mode
+  ansible.builtin.assert:
+    that:
+      - redis_mode == 'standalone'
+    fail_msg: "redis_mode '{{ redis_mode }}' is not supported by this role yet"
+  tags:
+    - redis
+
+- name: Build effective ACL user list
+  when: redis_acl_enabled
+  vars:
+    _acl_users: |-
+      {% set users = redis_acl_users | list %}
+      {% if redis_acl_create_default_password_user and (redis_password | default('') | length > 0) %}
+      {%   set default_user = {
+            'name': redis_acl_default_user_name,
+            'commands': redis_acl_default_user_commands,
+            'keys': redis_acl_default_user_keys,
+            'channels': redis_acl_default_user_channels,
+            'passwords': [redis_password],
+            'enabled': redis_acl_default_user_enabled
+          } %}
+      {%   set _ = users.append(default_user) %}
+      {% endif %}
+      {{ users }}
+  ansible.builtin.set_fact:
+    redis_acl_users_effective: "{{ _acl_users | from_yaml }}"
+  tags:
+    - redis
+
+- name: Ensure ACL user list empty when ACLs disabled
+  when: not redis_acl_enabled
+  ansible.builtin.set_fact:
+    redis_acl_users_effective: []
+  tags:
+    - redis
+
+- name: Prepare ACL configuration content
+  when: redis_acl_enabled
+  vars:
+    _acl_from_template: "{{ lookup('template', 'redis-acl.conf.j2') }}"
+  ansible.builtin.set_fact:
+    redis_acl_effective_content: "{{ (redis_acl_content | trim) if (redis_acl_content | length > 0) else (_acl_from_template | trim) }}\n"
+  tags:
+    - redis
+
+- name: Ensure ACL content empty when ACLs disabled
+  when: not redis_acl_enabled
+  ansible.builtin.set_fact:
+    redis_acl_effective_content: ""
+  tags:
+    - redis
+
+- name: Validate ACL user definitions
+  when:
+    - redis_acl_enabled
+    - redis_acl_content | length == 0
+  ansible.builtin.assert:
+    that:
+      - item.name | default('') | length > 0
+    fail_msg: "ACL users must define a non-empty name"
+  loop: "{{ redis_acl_users }}"
+  loop_control:
+    label: "{{ item.name | default('') }}"
+  tags:
+    - redis
+
+- name: Ensure ACL configuration defines an enabled user
+  when:
+    - redis_acl_enabled
+    - redis_acl_content | length == 0
+  ansible.builtin.assert:
+    that:
+      - (redis_acl_users_effective | selectattr('enabled', 'defined') | selectattr('enabled') | list | length) > 0
+    fail_msg: "ACLs are enabled but no enabled users were defined. Provide redis_password or customize redis_acl_users."
+  tags:
+    - redis
+
+- name: Locate redis-server binary for ACL validation
+  when:
+    - redis_acl_enabled
+    - redis_acl_validate
+    - redis_acl_validator_command | length == 0
+  ansible.builtin.command: which redis-server
+  register: redis_acl_redis_server_check
+  failed_when: false
+  changed_when: false
+  tags:
+    - redis
+
+- name: Locate redis-cli binary for ACL validation
+  when:
+    - redis_acl_enabled
+    - redis_acl_validate
+    - redis_acl_validator_command | length == 0
+  ansible.builtin.command: which redis-cli
+  register: redis_acl_redis_cli_check
+  failed_when: false
+  changed_when: false
+  tags:
+    - redis
+
+- name: Set ACL validation availability
+  when:
+    - redis_acl_enabled
+    - redis_acl_validate
+    - redis_acl_validator_command | length == 0
+  ansible.builtin.set_fact:
+    redis_acl_validation_available: "{{ (redis_acl_redis_server_check.rc | default(1)) == 0 and (redis_acl_redis_cli_check.rc | default(1)) == 0 }}"
+  tags:
+    - redis
+
+- name: Warn when ACL validation prerequisites missing
+  when:
+    - redis_acl_enabled
+    - redis_acl_validate
+    - redis_acl_validator_command | length == 0
+    - not redis_acl_validation_available | default(false)
+  ansible.builtin.debug:
+    msg: "Skipping ACL validation because redis-server or redis-cli is not available on the control host"
+  tags:
+    - redis
+
+- name: Create temporary ACL file for validation
+  when:
+    - redis_acl_enabled
+    - redis_acl_validate
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .acl
+  register: redis_acl_validation_tempfile
+  tags:
+    - redis
+
+- name: Write ACL content to validation file
+  when:
+    - redis_acl_enabled
+    - redis_acl_validate
+  ansible.builtin.copy:
+    dest: "{{ redis_acl_validation_tempfile.path }}"
+    content: "{{ redis_acl_effective_content }}"
+    mode: "0600"
+  tags:
+    - redis
+
+- block:
+    - name: Ensure temporary Redis instance started for ACL validation
+      when: redis_acl_validator_command | length == 0
+      ansible.builtin.command: >-
+        redis-server
+        --daemonize yes
+        --save ""
+        --appendonly no
+        --bind 127.0.0.1
+        --port 0
+        --aclfile {{ redis_acl_validation_tempfile.path }}
+        --dir {{ redis_acl_validation_tempfile.path | dirname }}
+        --logfile {{ redis_acl_validation_tempfile.path }}.log
+        --pidfile {{ redis_acl_validation_tempfile.path }}.pid
+        --unixsocket {{ redis_acl_validation_tempfile.path }}.sock
+        --unixsocketperm 700
+      register: redis_acl_validation_start
+      changed_when: false
+      failed_when: redis_acl_validation_start.rc not in [0]
+
+    - name: Wait for temporary Redis socket
+      when: redis_acl_validator_command | length == 0
+      ansible.builtin.command: redis-cli -s {{ redis_acl_validation_tempfile.path }}.sock PING
+      register: redis_acl_validation_ping
+      retries: 5
+      delay: 1
+      until: redis_acl_validation_ping.rc == 0
+      changed_when: false
+
+    - name: Load ACL file using redis-cli
+      when: redis_acl_validator_command | length == 0
+      ansible.builtin.command: redis-cli -s {{ redis_acl_validation_tempfile.path }}.sock ACL LOAD
+      register: redis_acl_validation_result
+      changed_when: false
+
+    - name: Run custom ACL validation command
+      when:
+        - redis_acl_validator_command | length > 0
+      ansible.builtin.shell: "{{ redis_acl_validator_command | replace('%ACL_FILE%', redis_acl_validation_tempfile.path) }}"
+      args:
+        executable: /bin/sh
+      changed_when: false
+  when:
+    - redis_acl_enabled
+    - redis_acl_validate
+    - redis_acl_validation_tempfile is defined
+    - redis_acl_validator_command | length > 0 or redis_acl_validation_available | default(false)
+  always:
+    - name: Shutdown temporary Redis instance
+      when:
+        - redis_acl_validator_command | length == 0
+        - redis_acl_validate
+      ansible.builtin.command: redis-cli -s {{ redis_acl_validation_tempfile.path }}.sock SHUTDOWN NOSAVE
+      changed_when: false
+      failed_when: false
+  tags:
+    - redis
+
+- name: Remove temporary ACL validation file
+  when:
+    - redis_acl_enabled
+    - redis_acl_validate
+    - redis_acl_validation_tempfile is defined
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ redis_acl_validation_tempfile.path }}"
+    - "{{ redis_acl_validation_tempfile.path }}.log"
+    - "{{ redis_acl_validation_tempfile.path }}.pid"
+    - "{{ redis_acl_validation_tempfile.path }}.sock"
+  tags:
+    - redis
+
 - name: Ensure password secret managed when requested
   when:
     - redis_runtime_target == 'kubernetes'
@@ -77,5 +304,27 @@
   vars:
     service_runtime: "{{ redis_runtime_target }}"
     service_runtime_objects: {{ redis_runtime_render.service_runtime_objects | default([]) }}
+  tags:
+    - redis
+
+- name: Reload Redis ACLs when configuration changes
+  when:
+    - redis_runtime_target == 'kubernetes'
+    - redis_acl_enabled
+  kubernetes.core.k8s_exec:
+    namespace: "{{ redis_namespace }}"
+    pod: "{{ redis_statefulset_name }}-0"
+    container: redis
+    command:
+      - sh
+      - -c
+      - >-
+        REDIS_PASSWORD="$(cat /run/redis-password/password)" &&
+{% if redis_tls_enabled %}
+        redis-cli --tls --cert {{ redis_tls_mount_path }}/{{ redis_tls_cert_secret_cert_key }} --key {{ redis_tls_mount_path }}/{{ redis_tls_cert_secret_key_key }} --cacert {{ redis_tls_mount_path }}/{{ redis_tls_cert_secret_ca_key }} -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_tls_port }} ACL LOAD
+{% else %}
+        redis-cli -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_port }} ACL LOAD
+{% endif %}
+  ignore_errors: true
   tags:
     - redis

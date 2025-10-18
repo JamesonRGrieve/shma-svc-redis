@@ -1,0 +1,41 @@
+{% for user in redis_acl_users_effective %}
+{% set is_enabled = user.enabled | default(false) %}
+{% set user_tokens = ['user ' ~ user.name] %}
+{% if is_enabled %}
+{%   set _ = user_tokens.append('on') %}
+{% else %}
+{%   set _ = user_tokens.append('off') %}
+{% endif %}
+{% if user.reset | default(true) %}
+{%   set _ = user_tokens.append('resetpass') %}
+{%   set _ = user_tokens.append('resetkeys') %}
+{%   set _ = user_tokens.append('resetchannels') %}
+{%   set _ = user_tokens.append('resetcommands') %}
+{% endif %}
+{% for pwd in user.passwords | default([]) %}
+{%   set _ = user_tokens.append('>' ~ pwd) %}
+{% endfor %}
+{% for hashed in user.hashed_passwords | default([]) %}
+{%   set _ = user_tokens.append('#' ~ hashed) %}
+{% endfor %}
+{% for command in user.commands | default([]) %}
+{%   if command.startswith('+') or command.startswith('-') %}
+{%     set token = command %}
+{%   elif command in ['allcommands', 'nocommands'] %}
+{%     set token = command %}
+{%   else %}
+{%     set token = '+' ~ command %}
+{%   endif %}
+{%   set _ = user_tokens.append(token) %}
+{% endfor %}
+{% for category in user.categories | default([]) %}
+{%   set _ = user_tokens.append('@' ~ category if not category.startswith('@') else category) %}
+{% endfor %}
+{% for key in user.keys | default([]) %}
+{%   set _ = user_tokens.append('~' ~ key if not key.startswith('~') else key) %}
+{% endfor %}
+{% for channel in user.channels | default([]) %}
+{%   set _ = user_tokens.append('&' ~ channel if not channel.startswith('&') else channel) %}
+{% endfor %}
+{{ user_tokens | join(' ') }}
+{% endfor %}

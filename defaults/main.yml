@@ -12,7 +12,17 @@ redis_runtime_templates:
 redis_image: "docker.io/bitnami/redis:7.2"
 redis_image_pull_policy: "IfNotPresent"
 redis_replicas: 1
+redis_mode: "standalone"  # sentinel and cluster modes planned
 redis_port: 6379
+redis_tls_enabled: false
+redis_enable_plaintext_port: true
+redis_tls_port: 6380
+redis_tls_auth_clients: "yes"
+redis_tls_cert_secret_name: "redis-tls"
+redis_tls_cert_secret_ca_key: "ca.crt"
+redis_tls_cert_secret_cert_key: "tls.crt"
+redis_tls_cert_secret_key_key: "tls.key"
+redis_tls_mount_path: "/etc/redis/tls"
 redis_storage_size: 8Gi
 redis_storage_class: ""
 redis_access_modes:
@@ -25,11 +35,35 @@ redis_configmap_name: "redis-config"
 redis_statefulset_name: "redis"
 redis_service_name: "redis"
 redis_headless_service_name: "redis-headless"
-redis_maxmemory: "512mb"
-redis_maxmemory_policy: "allkeys-lru"
+redis_maxmemory: "2gb"
+redis_maxmemory_policy: "noeviction"
 redis_appendfsync: "everysec"
+redis_maxclients: 10000
+redis_rate_limit_documentation: "Implement namespace-level rate limiting using NetworkPolicy with limiters such as Cilium or Calico."
+redis_save_points:
+  - seconds: 900
+    changes: 1
+  - seconds: 300
+    changes: 10
+  - seconds: 60
+    changes: 10000
+redis_tcp_keepalive: 300
+redis_timeout: 0
+redis_tcp_backlog: 511
+redis_lua_time_limit: 5000
+redis_slowlog_log_slower_than: 10000
+redis_slowlog_max_len: 128
+redis_disable_dangerous_commands:
+  - FLUSHDB
+  - FLUSHALL
 redis_additional_config: []
-redis_resources: {}
+redis_resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
 redis_node_selector: {}
 redis_affinity: {}
 redis_tolerations: []
@@ -40,15 +74,46 @@ redis_network_policy_allowed_peers:
   - podSelector:
       matchLabels:
         shma.dev/redis-access: "true"
-redis_acl_enabled: false
+redis_acl_enabled: true
 redis_acl_secret_name: "redis-acl"
 redis_acl_secret_key: "users.acl"
 redis_manage_acl_secret: false
+redis_acl_users:
+  - name: "default"
+    commands:
+      - "nocommands"
+    keys:
+      - "~*"
+    enabled: false
 redis_acl_content: ""
+redis_acl_validate: true
+redis_acl_validator_command: ""
+redis_acl_create_default_password_user: true
+redis_acl_default_user_name: "{{ redis_name }}-app"
+redis_acl_default_user_commands:
+  - "+@all"
+  - "-@admin"
+  - "-@dangerous"
+redis_acl_default_user_keys:
+  - "~*"
+redis_acl_default_user_channels:
+  - "&*"
+redis_acl_default_user_enabled: true
 redis_service_exports:
   env:
     REDIS_HOST: "{{ redis_service_name }}"
     REDIS_PORT: "{{ redis_port | string }}"
+    REDIS_TLS_PORT: "{{ redis_tls_port | string }}"
+    REDIS_TLS_ENABLED: "{{ 'true' if redis_tls_enabled else 'false' }}"
+redis_enable_metrics: false
+redis_metrics_image: "quay.io/oliver006/redis_exporter:v1.51.0"
+redis_metrics_resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
 redis_kubernetes_data_dir: "/bitnami/redis/data"
 redis_lxc_data_dir: "/var/lib/redis"
 redis_appendonlydir_enabled: true
@@ -60,8 +125,13 @@ redis_ephemeral_mounts:
   appendonlydir:
     enabled: {{ redis_appendonlydir_enabled }}
     kubernetes:
-      medium: Memory
+      medium: ""
       size_limit: "{{ redis_appendonlydir_size_limit }}"
     lxc:
       size: "{{ redis_appendonlydir_tmpfs_size }}"
       options: "{{ redis_appendonlydir_tmpfs_options }}"
+redis_backup_enabled: false
+redis_backup_schedule: "0 2 * * *"
+redis_backup_image: "docker.io/bitnami/redis:7.2"
+redis_backup_command: []
+redis_backup_extra_env: {}
