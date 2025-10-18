@@ -36,12 +36,15 @@ config:
           port {{ redis_port }}
           protected-mode yes
           dir /var/lib/redis
-          appendonly yes
+          appendonly {{ 'yes' if redis_persistence_enabled else 'no' }}
           appendfsync {{ redis_appendfsync }}
           maxmemory {{ redis_maxmemory }}
           maxmemory-policy {{ redis_maxmemory_policy }}
           rename-command FLUSHDB ""
           rename-command FLUSHALL ""
+{% if not redis_persistence_enabled %}
+          save ""
+{% endif %}
 {%- if redis_password_value %}
           requirepass {{ redis_password_value }}
 {%- endif %}

@@ -13,12 +13,15 @@ data:
     port {{ redis_port }}
     protected-mode yes
     dir /bitnami/redis/data
-    appendonly yes
+    appendonly {{ 'yes' if redis_persistence_enabled else 'no' }}
     appendfsync {{ redis_appendfsync }}
     maxmemory {{ redis_maxmemory }}
     maxmemory-policy {{ redis_maxmemory_policy }}
     rename-command FLUSHDB ""
     rename-command FLUSHALL ""
+{% if not redis_persistence_enabled %}
+    save ""
+{% endif %}
 {% if redis_acl_enabled %}
     aclfile /opt/bitnami/redis/mounted-etc/users.acl
 {% endif %}
@@ -90,15 +93,27 @@ spec:
           resources: {}
 {% endif %}
           livenessProbe:
-            tcpSocket:
-              port: redis
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  REDIS_PASSWORD="$(cat /run/redis-password/password)" &&
+                  redis-cli -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_port }} ping
             initialDelaySeconds: 30
             periodSeconds: 30
+            timeoutSeconds: 5
           readinessProbe:
-            tcpSocket:
-              port: redis
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  REDIS_PASSWORD="$(cat /run/redis-password/password)" &&
+                  redis-cli -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_port }} ping | grep -q PONG
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
 {% if redis_node_selector %}
       nodeSelector:
 {{ redis_node_selector | to_nice_yaml(indent=8) | indent(6, False) }}
@@ -141,6 +156,11 @@ spec:
               - key: {{ redis_acl_secret_key }}
                 path: users.acl
 {% endif %}
+{% if not redis_persistence_enabled %}
+        - name: redis-data
+          emptyDir: {}
+{% endif %}
+{% if redis_persistence_enabled %}
   volumeClaimTemplates:
     - metadata:
         name: redis-data
@@ -158,6 +178,7 @@ spec:
             storage: {{ redis_storage_size }}
 {% if redis_storage_class %}
         storageClassName: {{ redis_storage_class }}
+{% endif %}
 {% endif %}
 ---
 apiVersion: v1

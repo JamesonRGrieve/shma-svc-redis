@@ -34,6 +34,7 @@ redis_node_selector: {}
 redis_affinity: {}
 redis_tolerations: []
 redis_topology_spread_constraints: []
+redis_persistence_enabled: true
 redis_network_policy_enabled: true
 redis_network_policy_allowed_peers:
   - podSelector:
