@@ -7,29 +7,58 @@ metadata:
 {% set appendonly_mount = redis_ephemeral_mounts.get('appendonlydir', {}) %}
 {% set appendonly_enabled = appendonly_mount.get('enabled', False) %}
 {% set appendonly_k8s = appendonly_mount.get('kubernetes', {}) %}
+{% set appendonly_fs_tmpfs = appendonly_k8s.get('medium', '') | lower == 'memory' %}
+{% set appendfsync_value = 'no' if appendonly_fs_tmpfs else redis_appendfsync %}
+{% set acl_secret_path = '/opt/bitnami/redis/mounted-etc/users.acl' %}
+{% set tls_cert_path = redis_tls_mount_path %}
+{% set redis_port_value = redis_port if redis_enable_plaintext_port else 0 %}
 {% for key, value in redis_labels.items() %}
     {{ key }}: {{ value }}
 {% endfor %}
 data:
   redis.conf: |
     bind 0.0.0.0
-    port {{ redis_port }}
+    port {{ redis_port_value }}
     protected-mode yes
+    tcp-keepalive {{ redis_tcp_keepalive }}
+    timeout {{ redis_timeout }}
+    tcp-backlog {{ redis_tcp_backlog }}
     dir {{ redis_kubernetes_data_dir }}
 {% if appendonly_enabled and redis_appendonlydir_name %}
     appenddirname {{ redis_appendonlydir_name }}
 {% endif %}
     appendonly {{ 'yes' if redis_persistence_enabled else 'no' }}
-    appendfsync {{ redis_appendfsync }}
+    appendfsync {{ appendfsync_value }}
     maxmemory {{ redis_maxmemory }}
     maxmemory-policy {{ redis_maxmemory_policy }}
-    rename-command FLUSHDB ""
-    rename-command FLUSHALL ""
+    maxclients {{ redis_maxclients }}
+    lua-time-limit {{ redis_lua_time_limit }}
+    slowlog-log-slower-than {{ redis_slowlog_log_slower_than }}
+    slowlog-max-len {{ redis_slowlog_max_len }}
+{% for cmd in redis_disable_dangerous_commands %}
+    rename-command {{ cmd }} ""
+{% endfor %}
 {% if not redis_persistence_enabled %}
     save ""
 {% endif %}
+{% if redis_persistence_enabled and redis_save_points %}
+{% for save in redis_save_points %}
+    save {{ save.seconds }} {{ save.changes }}
+{% endfor %}
+{% endif %}
 {% if redis_acl_enabled %}
-    aclfile /opt/bitnami/redis/mounted-etc/users.acl
+    aclfile {{ acl_secret_path }}
+{% endif %}
+{% if redis_tls_enabled %}
+    tls-port {{ redis_tls_port }}
+    tls-cert-file {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }}
+    tls-key-file {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }}
+    tls-ca-cert-file {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }}
+    tls-auth-clients {{ redis_tls_auth_clients }}
+    tls-replication yes
+    tls-cluster yes
+{% else %}
+    tls-port 0
 {% endif %}
 {% for line in redis_additional_config %}
     {{ line }}
@@ -78,10 +107,30 @@ spec:
             - name: REDIS_HOST
               value: "{{ redis_service_name }}"
             - name: REDIS_PORT
-              value: "{{ redis_port | string }}"
+              value: "{{ (redis_tls_port if redis_tls_enabled and not redis_enable_plaintext_port else redis_port) | string }}"
+{% if redis_tls_enabled %}
+            - name: REDIS_TLS_ENABLED
+              value: "yes"
+            - name: REDIS_TLS_PORT
+              value: "{{ redis_tls_port | string }}"
+            - name: REDIS_TLS_CERT_FILE
+              value: {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }}
+            - name: REDIS_TLS_KEY_FILE
+              value: {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }}
+            - name: REDIS_TLS_CA_FILE
+              value: {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }}
+            - name: REDIS_TLS_AUTH_CLIENTS
+              value: {{ redis_tls_auth_clients | quote }}
+{% endif %}
           ports:
+{% if redis_enable_plaintext_port %}
             - name: redis
               containerPort: {{ redis_port }}
+{% endif %}
+{% if redis_tls_enabled %}
+            - name: redis-tls
+              containerPort: {{ redis_tls_port }}
+{% endif %}
           volumeMounts:
             - name: redis-config
               mountPath: /opt/bitnami/redis/mounted-etc
@@ -90,8 +139,13 @@ spec:
               readOnly: true
 {% if redis_acl_enabled %}
             - name: redis-acl
-              mountPath: /opt/bitnami/redis/mounted-etc/users.acl
+              mountPath: {{ acl_secret_path }}
               subPath: users.acl
+              readOnly: true
+{% endif %}
+{% if redis_tls_enabled %}
+            - name: redis-tls
+              mountPath: {{ tls_cert_path }}
               readOnly: true
 {% endif %}
             - name: redis-data
@@ -100,12 +154,8 @@ spec:
             - name: redis-appendonlydir
               mountPath: {{ redis_kubernetes_data_dir }}/{{ redis_appendonlydir_name }}
 {% endif %}
-{% if redis_resources %}
           resources:
 {{ redis_resources | to_nice_yaml(indent=12) | indent(10, False) }}
-{% else %}
-          resources: {}
-{% endif %}
           livenessProbe:
             exec:
               command:
@@ -113,7 +163,11 @@ spec:
                 - -c
                 - >-
                   REDIS_PASSWORD="$(cat /run/redis-password/password)" &&
+{% if redis_tls_enabled %}
+                  redis-cli --tls --cert {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }} --key {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }} --cacert {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }} -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_tls_port }} ping
+{% else %}
                   redis-cli -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_port }} ping
+{% endif %}
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 5
@@ -124,10 +178,47 @@ spec:
                 - -c
                 - >-
                   REDIS_PASSWORD="$(cat /run/redis-password/password)" &&
+{% if redis_tls_enabled %}
+                  redis-cli --tls --cert {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }} --key {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }} --cacert {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }} -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_tls_port }} ping | grep -q PONG
+{% else %}
                   redis-cli -a "$REDIS_PASSWORD" -h 127.0.0.1 -p {{ redis_port }} ping | grep -q PONG
+{% endif %}
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
+{% if redis_enable_metrics %}
+        - name: redis-exporter
+          image: {{ redis_metrics_image }}
+          ports:
+            - name: metrics
+              containerPort: 9121
+          env:
+            - name: REDIS_ADDR
+              value: {{ 'rediss' if redis_tls_enabled else 'redis' }}://127.0.0.1:{{ (redis_tls_port if redis_tls_enabled else redis_port) | string }}
+            - name: REDIS_PASSWORD_FILE
+              value: /run/redis-password/password
+{% if redis_tls_enabled %}
+            - name: REDIS_EXPORTER_SKIP_TLS_VERIFICATION
+              value: "false"
+            - name: REDIS_EXPORTER_TLS_CLIENT_CERT_FILE
+              value: {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }}
+            - name: REDIS_EXPORTER_TLS_CLIENT_KEY_FILE
+              value: {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }}
+            - name: REDIS_EXPORTER_TLS_CA_CERT_FILE
+              value: {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }}
+{% endif %}
+          volumeMounts:
+            - name: redis-password
+              mountPath: /run/redis-password
+              readOnly: true
+{% if redis_tls_enabled %}
+            - name: redis-tls
+              mountPath: {{ tls_cert_path }}
+              readOnly: true
+{% endif %}
+          resources:
+{{ redis_metrics_resources | to_nice_yaml(indent=12) | indent(10, False) }}
+{% endif %}
 {% if redis_node_selector %}
       nodeSelector:
 {{ redis_node_selector | to_nice_yaml(indent=8) | indent(6, False) }}
@@ -169,6 +260,11 @@ spec:
             items:
               - key: {{ redis_acl_secret_key }}
                 path: users.acl
+{% endif %}
+{% if redis_tls_enabled %}
+        - name: redis-tls
+          secret:
+            secretName: {{ redis_tls_cert_secret_name }}
 {% endif %}
 {% if not redis_persistence_enabled %}
         - name: redis-data
@@ -221,9 +317,16 @@ metadata:
 spec:
   type: ClusterIP
   ports:
+{% if redis_enable_plaintext_port %}
     - name: redis
       port: {{ redis_port }}
       targetPort: redis
+{% endif %}
+{% if redis_tls_enabled %}
+    - name: redis-tls
+      port: {{ redis_tls_port }}
+      targetPort: redis-tls
+{% endif %}
   selector:
 {% for key, value in redis_labels.items() %}
     {{ key }}: {{ value }}
@@ -242,9 +345,16 @@ spec:
   clusterIP: None
   publishNotReadyAddresses: true
   ports:
+{% if redis_enable_plaintext_port %}
     - name: redis
       port: {{ redis_port }}
       targetPort: redis
+{% endif %}
+{% if redis_tls_enabled %}
+    - name: redis-tls
+      port: {{ redis_tls_port }}
+      targetPort: redis-tls
+{% endif %}
   selector:
 {% for key, value in redis_labels.items() %}
     {{ key }}: {{ value }}
@@ -260,6 +370,8 @@ metadata:
 {% for key, value in redis_labels.items() %}
     {{ key }}: {{ value }}
 {% endfor %}
+  annotations:
+    shma.dev/rate-limiting: {{ redis_rate_limit_documentation | quote }}
 spec:
   podSelector:
     matchLabels:
@@ -270,8 +382,14 @@ spec:
     - Ingress
   ingress:
     - ports:
+{% if redis_enable_plaintext_port %}
         - protocol: TCP
           port: {{ redis_port }}
+{% endif %}
+{% if redis_tls_enabled %}
+        - protocol: TCP
+          port: {{ redis_tls_port }}
+{% endif %}
 {% if redis_network_policy_allowed_peers %}
       from:
 {% for peer in redis_network_policy_allowed_peers %}
@@ -291,5 +409,77 @@ spec:
 {% endfor %}
 {% else %}
       from: []
+{% endif %}
+{% endif %}
+---
+{% if redis_backup_enabled %}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ redis_name }}-backup
+  namespace: {{ redis_namespace }}
+  labels:
+{% for key, value in redis_labels.items() %}
+    {{ key }}: {{ value }}
+{% endfor %}
+spec:
+  schedule: {{ redis_backup_schedule | quote }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+{% for key, value in redis_labels.items() %}
+            {{ key }}: {{ value }}
+{% endfor %}
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: redis-backup
+              image: {{ redis_backup_image }}
+              command:
+{% if redis_backup_command %}
+{{ redis_backup_command | to_nice_yaml(indent=16) | indent(14, False) }}
+{% else %}
+                - /bin/sh
+                - -c
+                - >-
+                  REDIS_PASSWORD="$(cat /run/redis-password/password)" &&
+{% if redis_tls_enabled %}
+                  redis-cli --tls --cert {{ tls_cert_path }}/{{ redis_tls_cert_secret_cert_key }} --key {{ tls_cert_path }}/{{ redis_tls_cert_secret_key_key }} --cacert {{ tls_cert_path }}/{{ redis_tls_cert_secret_ca_key }} -a "$REDIS_PASSWORD" -h {{ redis_service_name }} -p {{ redis_tls_port }} --rdb /backup/dump-$(date +%Y%m%d%H%M%S).rdb
+{% else %}
+                  redis-cli -a "$REDIS_PASSWORD" -h {{ redis_service_name }} -p {{ redis_port }} --rdb /backup/dump-$(date +%Y%m%d%H%M%S).rdb
+{% endif %}
+              volumeMounts:
+                - name: redis-password
+                  mountPath: /run/redis-password
+                  readOnly: true
+                - name: redis-backup
+                  mountPath: /backup
+{% if redis_tls_enabled %}
+                - name: redis-tls
+                  mountPath: {{ tls_cert_path }}
+                  readOnly: true
+{% endif %}
+{% if redis_backup_extra_env %}
+              env:
+{% for key, value in redis_backup_extra_env.items() %}
+                - name: {{ key }}
+                  value: {{ value | quote }}
+{% endfor %}
+{% endif %}
+          volumes:
+            - name: redis-password
+              secret:
+                secretName: {{ redis_password_secret_name }}
+                items:
+                  - key: {{ redis_password_secret_key }}
+                    path: password
+            - name: redis-backup
+              emptyDir: {}
+{% if redis_tls_enabled %}
+            - name: redis-tls
+              secret:
+                secretName: {{ redis_tls_cert_secret_name }}
 {% endif %}
 {% endif %}
