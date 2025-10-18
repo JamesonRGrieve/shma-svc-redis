@@ -1,6 +1,14 @@
 ---
+- name: Determine target runtime
+  ansible.builtin.set_fact:
+    redis_runtime_target: "{{ service_runtime | default('kubernetes') }}"
+  tags:
+    - redis
+
 - name: Ensure redis namespace exists
-  when: redis_manage_namespace
+  when:
+    - redis_runtime_target == 'kubernetes'
+    - redis_manage_namespace
   kubernetes.core.k8s:
     state: present
     definition:
@@ -21,7 +29,9 @@
     - redis
 
 - name: Ensure password secret managed when requested
-  when: redis_manage_password_secret
+  when:
+    - redis_runtime_target == 'kubernetes'
+    - redis_manage_password_secret
   kubernetes.core.k8s:
     state: present
     definition: {{ lookup('template', 'redis-password-secret.yml.j2') | from_yaml }}
@@ -31,6 +41,7 @@
 
 - name: Ensure ACL secret managed when requested
   when:
+    - redis_runtime_target == 'kubernetes'
     - redis_acl_enabled
     - redis_manage_acl_secret
   kubernetes.core.k8s:
@@ -40,12 +51,31 @@
   tags:
     - redis
 
-- name: Deploy Redis manifests
-  kubernetes.core.k8s:
-    state: present
-    definition: {{ item }}
-  loop: {{ lookup('template', 'redis.yml.j2') | from_yaml_all | select('ne', None) | list }}
-  loop_control:
-    label: "{{ item.kind | default('object') }} {{ item.metadata.name | default('') }}"
+- name: Prepare service contract defaults
+  ansible.builtin.set_fact:
+    service_name: "{{ service_name | default(redis_name) }}"
+    service_namespace: "{{ service_namespace | default(redis_namespace) }}"
+    service_labels: {{ service_labels | default(redis_labels) }}
+    service_runtime_templates: {{ service_runtime_templates | default(redis_runtime_templates) }}
+    service_exports: {{ service_exports | default(redis_service_exports) }}
+    service_ephemeral_mounts: {{ service_ephemeral_mounts | default(redis_ephemeral_mounts) }}
+  tags:
+    - redis
+
+- name: Render Redis runtime configuration
+  ansible.builtin.include_role:
+    name: common.render_runtime
+  vars:
+    service_runtime: "{{ redis_runtime_target }}"
+  register: redis_runtime_render
+  tags:
+    - redis
+
+- name: Apply Redis runtime configuration
+  ansible.builtin.include_role:
+    name: common.apply_runtime
+  vars:
+    service_runtime: "{{ redis_runtime_target }}"
+    service_runtime_objects: {{ redis_runtime_render.service_runtime_objects | default([]) }}
   tags:
     - redis
