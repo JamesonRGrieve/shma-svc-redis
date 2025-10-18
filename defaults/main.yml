@@ -45,3 +45,23 @@ redis_acl_secret_name: "redis-acl"
 redis_acl_secret_key: "users.acl"
 redis_manage_acl_secret: false
 redis_acl_content: ""
+redis_service_exports:
+  env:
+    REDIS_HOST: "{{ redis_service_name }}"
+    REDIS_PORT: "{{ redis_port | string }}"
+redis_kubernetes_data_dir: "/bitnami/redis/data"
+redis_lxc_data_dir: "/var/lib/redis"
+redis_appendonlydir_enabled: true
+redis_appendonlydir_name: "appendonlydir"
+redis_appendonlydir_size_limit: ""
+redis_appendonlydir_tmpfs_size: ""
+redis_appendonlydir_tmpfs_options: "mode=0770"
+redis_ephemeral_mounts:
+  appendonlydir:
+    enabled: {{ redis_appendonlydir_enabled }}
+    kubernetes:
+      medium: Memory
+      size_limit: "{{ redis_appendonlydir_size_limit }}"
+    lxc:
+      size: "{{ redis_appendonlydir_tmpfs_size }}"
+      options: "{{ redis_appendonlydir_tmpfs_options }}"

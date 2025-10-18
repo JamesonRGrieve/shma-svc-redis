@@ -4,6 +4,9 @@ metadata:
   name: {{ redis_configmap_name }}
   namespace: {{ redis_namespace }}
   labels:
+{% set appendonly_mount = redis_ephemeral_mounts.get('appendonlydir', {}) %}
+{% set appendonly_enabled = appendonly_mount.get('enabled', False) %}
+{% set appendonly_k8s = appendonly_mount.get('kubernetes', {}) %}
 {% for key, value in redis_labels.items() %}
     {{ key }}: {{ value }}
 {% endfor %}
@@ -12,7 +15,10 @@ data:
     bind 0.0.0.0
     port {{ redis_port }}
     protected-mode yes
-    dir /bitnami/redis/data
+    dir {{ redis_kubernetes_data_dir }}
+{% if appendonly_enabled and redis_appendonlydir_name %}
+    appenddirname {{ redis_appendonlydir_name }}
+{% endif %}
     appendonly {{ 'yes' if redis_persistence_enabled else 'no' }}
     appendfsync {{ redis_appendfsync }}
     maxmemory {{ redis_maxmemory }}
@@ -69,6 +75,10 @@ spec:
               value: /run/redis-password/password
             - name: ALLOW_EMPTY_PASSWORD
               value: "no"
+            - name: REDIS_HOST
+              value: "{{ redis_service_name }}"
+            - name: REDIS_PORT
+              value: "{{ redis_port | string }}"
           ports:
             - name: redis
               containerPort: {{ redis_port }}
@@ -85,7 +95,11 @@ spec:
               readOnly: true
 {% endif %}
             - name: redis-data
-              mountPath: /bitnami/redis/data
+              mountPath: {{ redis_kubernetes_data_dir }}
+{% if appendonly_enabled and redis_appendonlydir_name %}
+            - name: redis-appendonlydir
+              mountPath: {{ redis_kubernetes_data_dir }}/{{ redis_appendonlydir_name }}
+{% endif %}
 {% if redis_resources %}
           resources:
 {{ redis_resources | to_nice_yaml(indent=12) | indent(10, False) }}
@@ -159,6 +173,20 @@ spec:
 {% if not redis_persistence_enabled %}
         - name: redis-data
           emptyDir: {}
+{% endif %}
+{% if appendonly_enabled and redis_appendonlydir_name %}
+        - name: redis-appendonlydir
+{% if appendonly_k8s.medium or appendonly_k8s.size_limit %}
+          emptyDir:
+{% if appendonly_k8s.medium %}
+            medium: {{ appendonly_k8s.medium }}
+{% endif %}
+{% if appendonly_k8s.size_limit %}
+            sizeLimit: {{ appendonly_k8s.size_limit }}
+{% endif %}
+{% else %}
+          emptyDir: {}
+{% endif %}
 {% endif %}
 {% if redis_persistence_enabled %}
   volumeClaimTemplates:

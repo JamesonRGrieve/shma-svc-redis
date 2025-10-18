@@ -1,5 +1,21 @@
 {%- set redis_password_value = redis_password | default('', true) -%}
 {%- set redis_password_value = redis_password_value | trim -%}
+{%- set appendonly_mount = redis_ephemeral_mounts.get('appendonlydir', {}) -%}
+{%- set appendonly_enabled = appendonly_mount.get('enabled', False) -%}
+{%- set appendonly_lxc = appendonly_mount.get('lxc', {}) -%}
+{%- set appendonly_mount_options = [] -%}
+{%- if appendonly_lxc.get('size') -%}
+{%-   set appendonly_mount_options = appendonly_mount_options + ['size=' ~ appendonly_lxc.get('size')] -%}
+{%- endif -%}
+{%- if appendonly_lxc.get('options') -%}
+{%-   set appendonly_mount_options = appendonly_mount_options + [appendonly_lxc.get('options')] -%}
+{%- endif -%}
+{%- set appendonly_mount_opts_joined = appendonly_mount_options | reject('equalto', '') | list | join(',') -%}
+{%- if redis_appendonlydir_name -%}
+{%-   set appendonly_path = redis_lxc_data_dir ~ '/' ~ redis_appendonlydir_name -%}
+{%- else -%}
+{%-   set appendonly_path = '' -%}
+{%- endif -%}
 {#- Intentionally allow empty passwords for backwards compatibility; callers should set redis_password. -#}
 ---
 name: {{ redis_name }}
@@ -22,6 +38,8 @@ config:
   environment.CACHE_URL: "redis://{{ service_ip }}:{{ redis_port }}/0"
 {%- endif %}
   environment.REDIS_PASSWORD: "{{ redis_password_value }}"
+  environment.REDIS_HOST: "{{ service_ip }}"
+  environment.REDIS_PORT: "{{ redis_port }}"
   user.user-data: |
     #cloud-config
     package_update: true
@@ -35,7 +53,10 @@ config:
           bind 0.0.0.0
           port {{ redis_port }}
           protected-mode yes
-          dir /var/lib/redis
+          dir {{ redis_lxc_data_dir }}
+{% if appendonly_enabled and redis_appendonlydir_name %}
+          appenddirname {{ redis_appendonlydir_name }}
+{% endif %}
           appendonly {{ 'yes' if redis_persistence_enabled else 'no' }}
           appendfsync {{ redis_appendfsync }}
           maxmemory {{ redis_maxmemory }}
@@ -53,6 +74,18 @@ config:
 {%- endfor %}
     runcmd:
       - install -d -o redis -g redis /etc/redis
+      - install -d -o redis -g redis {{ redis_lxc_data_dir }}
+{% if appendonly_enabled and appendonly_path %}
+      - install -d -o redis -g redis {{ appendonly_path }}
+      - |
+        if ! mountpoint -q {{ appendonly_path }}; then
+          mount -t tmpfs{% if appendonly_mount_opts_joined %} -o {{ appendonly_mount_opts_joined }}{% endif %} tmpfs {{ appendonly_path }}
+        fi
+      - |
+        if ! grep -q '^tmpfs {{ appendonly_path }} ' /etc/fstab; then
+          echo 'tmpfs {{ appendonly_path }} tmpfs defaults{% if appendonly_mount_opts_joined %},{{ appendonly_mount_opts_joined }}{% endif %} 0 0' >> /etc/fstab
+        fi
+{% endif %}
       - |
         if ! grep -q '^include /etc/redis/shma.conf' /etc/redis/redis.conf; then
           printf '%s\n' 'include /etc/redis/shma.conf' >> /etc/redis/redis.conf
