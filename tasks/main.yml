@@ -1,0 +1,51 @@
+---
+- name: Ensure redis namespace exists
+  when: redis_manage_namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ redis_namespace }}"
+  tags:
+    - redis
+
+- name: Validate password secret configuration
+  ansible.builtin.assert:
+    that:
+      - redis_password_secret_name | length > 0
+      - redis_password_secret_key | length > 0
+    fail_msg: "redis_password_secret_name and redis_password_secret_key must be provided"
+  tags:
+    - redis
+
+- name: Ensure password secret managed when requested
+  when: redis_manage_password_secret
+  kubernetes.core.k8s:
+    state: present
+    definition: {{ lookup('template', 'redis-password-secret.yml.j2') | from_yaml }}
+  no_log: true
+  tags:
+    - redis
+
+- name: Ensure ACL secret managed when requested
+  when:
+    - redis_acl_enabled
+    - redis_manage_acl_secret
+  kubernetes.core.k8s:
+    state: present
+    definition: {{ lookup('template', 'redis-acl-secret.yml.j2') | from_yaml }}
+  no_log: true
+  tags:
+    - redis
+
+- name: Deploy Redis manifests
+  kubernetes.core.k8s:
+    state: present
+    definition: {{ item }}
+  loop: {{ lookup('template', 'redis.yml.j2') | from_yaml_all | select('ne', None) | list }}
+  loop_control:
+    label: "{{ item.kind | default('object') }} {{ item.metadata.name | default('') }}"
+  tags:
+    - redis

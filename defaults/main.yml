@@ -1,0 +1,43 @@
+---
+redis_namespace: "redis"
+redis_manage_namespace: false
+redis_name: "redis"
+redis_labels:
+  app.kubernetes.io/name: "redis"
+  app.kubernetes.io/instance: "redis"
+  app.kubernetes.io/component: "database"
+redis_image: "docker.io/bitnami/redis:7.2"
+redis_image_pull_policy: "IfNotPresent"
+redis_replicas: 1
+redis_port: 6379
+redis_storage_size: 8Gi
+redis_storage_class: ""
+redis_access_modes:
+  - ReadWriteOnce
+redis_password_secret_name: "redis-auth"
+redis_password_secret_key: "redis-password"
+redis_manage_password_secret: false
+redis_password: ""
+redis_configmap_name: "redis-config"
+redis_statefulset_name: "redis"
+redis_service_name: "redis"
+redis_headless_service_name: "redis-headless"
+redis_maxmemory: "512mb"
+redis_maxmemory_policy: "allkeys-lru"
+redis_appendfsync: "everysec"
+redis_additional_config: []
+redis_resources: {}
+redis_node_selector: {}
+redis_affinity: {}
+redis_tolerations: []
+redis_topology_spread_constraints: []
+redis_network_policy_enabled: true
+redis_network_policy_allowed_peers:
+  - podSelector:
+      matchLabels:
+        shma.dev/redis-access: "true"
+redis_acl_enabled: false
+redis_acl_secret_name: "redis-acl"
+redis_acl_secret_key: "users.acl"
+redis_manage_acl_secret: false
+redis_acl_content: ""
